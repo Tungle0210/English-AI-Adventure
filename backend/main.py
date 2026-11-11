@@ -460,11 +460,18 @@ def generation_status(ident: str):
     if config.object_storage():
         for name in objects.list_names('qa/generation/'):
             path=objects.ensure(DATA,name)
-    files=sorted(folder.glob('*.json'),key=lambda p:p.stat().st_mtime,reverse=True) if folder.exists() else []
-    for path in files:
-        data=json.loads(path.read_text(encoding='utf-8'))
-        if data['lesson_id']==ident:return data
-    return {'events':[]}
+    # Files hydrated from S3 receive a fresh local mtime. Updating an old
+    # trace's display acknowledgement also changes mtime. Neither indicates
+    # when that Gemini attempt ran: use the persisted UTC event timestamp.
+    latest=None
+    if folder.exists():
+        for path in folder.glob('*.json'):
+            data=json.loads(path.read_text(encoding='utf-8'))
+            if data.get('lesson_id') != ident:
+                continue
+            if latest is None or (data.get('at',''),data.get('run_id','')) > (latest.get('at',''),latest.get('run_id','')):
+                latest=data
+    return latest if latest is not None else {'events':[]}
 
 
 @app.post('/api/lessons/{ident}/generation-status/{run_id}/displayed',dependencies=[Depends(teacher)])

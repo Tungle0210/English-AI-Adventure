@@ -274,3 +274,25 @@ def test_retry_reservation_enforces_local_rate_limit(client):
     assert err.value.status_code == 429
     with main.db() as c:
         assert c.execute('SELECT count(*) FROM calls').fetchone()[0] == 2
+
+
+def test_generation_status_uses_run_timestamp_instead_of_file_mtime(client):
+    """Older S3-hydrated or display-updated traces must not hide a successful run."""
+    lesson = source(client)
+    folder = main.DATA / 'qa' / 'generation'
+    folder.mkdir(parents=True, exist_ok=True)
+    older = folder / ('a' * 32 + '.json')
+    newer = folder / ('b' * 32 + '.json')
+    base = {'lesson_id': lesson['id'], 'events': [], 'cache_requested': False}
+    older.write_text(json.dumps(dict(base, run_id='a' * 32, at='2026-11-11T03:00:00+00:00',
+                                      events=[{'stage': 5, 'status': 'FAIL'}])))
+    newer.write_text(json.dumps(dict(base, run_id='b' * 32, at='2026-11-11T05:00:00+00:00',
+                                      events=[{'stage': 5, 'status': 'PASS'}])))
+    # Simulate an old failed trace being fetched from S3 AFTER the newer one.
+    import os
+    os.utime(newer, (100, 100))
+    os.utime(older, (200, 200))
+    response = client.get('/api/lessons/' + lesson['id'] + '/generation-status')
+    assert response.status_code == 200
+    assert response.json()['run_id'] == 'b' * 32
+    assert response.json()['events'][0]['status'] == 'PASS'
