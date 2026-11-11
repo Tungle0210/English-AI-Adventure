@@ -296,3 +296,71 @@ def test_generation_status_uses_run_timestamp_instead_of_file_mtime(client):
     assert response.status_code == 200
     assert response.json()['run_id'] == 'b' * 32
     assert response.json()['events'][0]['status'] == 'PASS'
+
+
+def test_teacher_permanent_delete_reclaims_only_unshared_sources(client):
+    first=source(client)
+    duplicate=client.post('/api/upload',files={'file':('same.txt',b'apple table')}).json()
+    sha=first['document']['sha256']
+    saved=main.DATA/'sources'/(sha+'.txt')
+    assert saved.is_file()
+    url='/api/lessons/'+first['id']
+    wrong=client.request('DELETE',url,json={'title':'wrong','revision':first['revision']})
+    assert wrong.status_code==422
+    assert client.get(url).status_code==200
+    badrev=client.request('DELETE',url,json={'title':first['title'],'revision':999})
+    assert badrev.status_code==409
+    deleted=client.request('DELETE',url,json={'title':first['title'],'revision':first['revision']})
+    assert deleted.status_code==200,deleted.text
+    assert deleted.json()['deleted']
+    assert client.get(url).status_code==404
+    assert client.get('/api/lessons/'+duplicate['id']).status_code==200
+    assert saved.is_file()  # Duplicate has the same SHA, so original must survive.
+    second=client.request('DELETE','/api/lessons/'+duplicate['id'],
+                          json={'title':duplicate['title'],'revision':duplicate['revision']})
+    assert second.status_code==200,second.text
+    assert not saved.exists()
+    assert client.get('/api/lessons').json()==[]
+
+
+def test_permanent_delete_retains_completed_student_results(client):
+    lesson=source(client)
+    with main.db() as c:
+        c.execute('INSERT INTO attempts VALUES(?,?,?,?,?,?,?,?)',
+                  ('historical-attempt',lesson['id'],lesson['title'],'quiz','[]','{}',main.now(),main.now()))
+    r=client.request('DELETE','/api/lessons/'+lesson['id'],
+                     json={'title':lesson['title'],'revision':lesson['revision']})
+    assert r.status_code==200,r.text
+    assert r.json()['preserved_student_results']==1
+    assert any(a['attempt_id']=='historical-attempt' for a in client.get('/api/results').json())
+    done=client.get('/api/attempts/historical-attempt')
+    assert done.status_code==200 and done.json()['questions']==[]
+
+
+def test_permanent_delete_blocks_live_student_attempt_and_running_job(client):
+    lesson=source(client)
+    with main.db() as c:
+        c.execute('INSERT INTO attempts VALUES(?,?,?,?,?,?,?,?)',
+                  ('live-attempt',lesson['id'],lesson['title'],'quiz','[]','{}',main.now(),None))
+    url='/api/lessons/'+lesson['id']
+    body={'title':lesson['title'],'revision':lesson['revision']}
+    assert client.request('DELETE',url,json=body).status_code==409
+    with main.db() as c:
+        c.execute('UPDATE attempts SET completed=? WHERE id=?',(main.now(),'live-attempt'))
+        c.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                  ('pending-delete-test','generate',lesson['id'],'{}','test-fingerprint','pending-delete-test','queued',None,None,1.0,1.0))
+    assert client.request('DELETE',url,json=body).status_code==409
+    assert client.get(url).status_code==200
+
+
+def test_known_object_delete_is_precise_and_no_bucket_wipe(tmp_path,monkeypatch):
+    from . import objects
+    monkeypatch.setenv('ADVENTURE_CLOUD_ENABLE','no')
+    kept=tmp_path/'sources/kept.txt';kept.parent.mkdir(parents=True)
+    dropped=tmp_path/'sources/old.txt'
+    kept.write_text('keep');dropped.write_text('drop')
+    objects.delete_known_object(tmp_path,'sources/old.txt')
+    assert kept.is_file() and not dropped.exists()
+    with pytest.raises(objects.ObjectFailure):
+        objects.delete_known_object(tmp_path,'../sources/kept.txt')
+    assert kept.is_file()
