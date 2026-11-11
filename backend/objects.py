@@ -72,6 +72,17 @@ def list_names(prefix):
     except Exception:raise ObjectFailure('S3 listing failed') from None
     return result
 
+def delete_known_object(root,relative):
+    """Remove a precisely identified retired object, never a bucket or wildcard."""
+    # key() rejects absolute paths, traversal and empty keys.
+    object_key=key(relative)
+    if config.object_storage():
+        try:client().delete_object(Bucket=bucket(),Key=object_key)
+        except Exception:raise ObjectFailure('S3 delete failed for retired object') from None
+    local=root/relative
+    if local.is_file():local.unlink()
+    return True
+
 def register_asset(root,document_hash,ident):
     if not config.object_storage():return
     relative='indexes/'+document_hash+'.json';path=root/relative
