@@ -7,7 +7,7 @@ def test_gemini_503_is_explicit_and_preserves_manual_retry_policy():
     status, message = ai_error(SimpleNamespace(code=503))
     assert status == 503
     assert '503' in message
-    assert 'không tự' in message.lower()
+    assert 'tối đa 2 lần' in message.lower()
     assert 'bản nháp' in message.lower()
 
 
