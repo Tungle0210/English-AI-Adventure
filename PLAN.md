@@ -1,3 +1,7 @@
+## Bản dùng thử cloud 11/11/2026
+
+Đã Push runtime PostgreSQL/S3 và kiểm thử CI Linux/Docker; mã giáo viên mới và dữ liệu DEMO trong schema riêng. Không migration 18 bài thật. Xem [hướng dẫn dùng thử và giới hạn](docs/FINAL_TRIAL.md). Các trạng thái chưa push/deploy phía dưới là lịch sử các giai đoạn trước.
+
 # Kế hoạch triển khai
 
 ## Neon/PostgreSQL + S3 — kiểm thử và chuẩn bị migration (11/11/2026)
