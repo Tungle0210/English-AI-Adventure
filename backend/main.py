@@ -343,7 +343,7 @@ def ai_error(error):
     if code == 404:
         return 502, 'Model Gemini không khả dụng (404). Bài đã lưu vẫn dùng được.'
     if code == 503:
-        return 503, 'Gemini tạm thời không khả dụng (HTTP 503). Bản nháp và bài học đã lưu được giữ nguyên. Hãy kiểm tra trạng thái tác vụ rồi chủ động thử lại sau; hệ thống không tự gửi yêu cầu AI lần nữa.'
+        return 503, 'Gemini vẫn không khả dụng (HTTP 503) sau tối đa 2 lần gọi có kiểm soát. Bản nháp và bài học đã lưu được giữ nguyên. Hãy kiểm tra trạng thái tác vụ trước khi chủ động thử lại sau.'
     if code in (500, 502, 504):
         return 502, 'Gemini trả lỗi máy chủ (HTTP ' + str(code) + '). Bản nháp được giữ nguyên; kiểm tra trạng thái tác vụ trước khi thử lại.'
     if code in (400, 401, 403):
