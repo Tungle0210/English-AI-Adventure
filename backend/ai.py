@@ -109,12 +109,23 @@ def generate(document, settings, media_root=None):
         contents.extend([f"Actual image asset {asset['id']} from source {asset['source']}:",types.Part.from_bytes(data=(root/'media'/(asset['id']+'.png')).read_bytes(),mime_type='image/png')])
     prompt_ms=round((time.perf_counter()-prompt_started)*1000,2)
     started=time.perf_counter()
+    attempts=0
+    # Retry only a transient provider 503 once. Never retry quota, auth,
+    # validation or timeout failures, which may already have consumed quota.
     try:
         with genai.Client(api_key=cfg['GEMINI_API_KEY'], http_options=types.HttpOptions(timeout=45000, retry_options=types.HttpRetryOptions(attempts=1))) as client:
-            response = client.models.generate_content(model=model, contents=contents, config=types.GenerateContentConfig(
-                temperature=0.2, max_output_tokens=min(12000,max(4000,settings.count*850)), response_mime_type='application/json', response_json_schema=transport_schema()))
+            while True:
+                attempts += 1
+                try:
+                    response = client.models.generate_content(model=model, contents=contents, config=types.GenerateContentConfig(
+                        temperature=0.2, max_output_tokens=min(12000,max(4000,settings.count*850)), response_mime_type='application/json', response_json_schema=transport_schema()))
+                    break
+                except Exception as error:
+                    if getattr(error, 'code', None) != 503 or attempts >= 2:
+                        raise
+                    time.sleep(2)
     except Exception as error:
-        error.pipeline_metrics={'prompt_ms':prompt_ms,'prompt_chars':len(contents[0]),'prompt_sha256':hashlib.sha256(contents[0].encode()).hexdigest(),'api_ms':round((time.perf_counter()-started)*1000,2),'sdk_attempts':1,'timeout_ms':45000}
+        error.pipeline_metrics={'prompt_ms':prompt_ms,'prompt_chars':len(contents[0]),'prompt_sha256':hashlib.sha256(contents[0].encode()).hexdigest(),'api_ms':round((time.perf_counter()-started)*1000,2),'sdk_attempts':attempts,'timeout_ms':45000}
         raise
     raw = response.text or ''
     if cfg['GEMINI_API_KEY'] in raw:
@@ -126,7 +137,7 @@ def generate(document, settings, media_root=None):
     except GenerationError as error:
         error.pipeline_metrics={'prompt_ms':prompt_ms,'prompt_chars':len(contents[0]),'api_ms':api_ms,'provider_http_status':200,'response_chars':len(raw)}
         raise
-    return data, {'model':model,'usage':response.usage_metadata.model_dump(mode='json') if response.usage_metadata else {},'validation':validation,'api_ms':api_ms,'prompt_ms':prompt_ms,'parse_ms':validation['parse_ms'],'validation_ms':round((time.perf_counter()-parsed)*1000,2),'provider_http_status':200,'prompt_chars':len(contents[0]),'prompt_sha256':hashlib.sha256(contents[0].encode()).hexdigest(),'response_chars':len(raw),'finish_reason':str(response.candidates[0].finish_reason) if response.candidates else 'UNKNOWN','sdk_attempts':1,'timeout_ms':45000}
+    return data, {'model':model,'usage':response.usage_metadata.model_dump(mode='json') if response.usage_metadata else {},'validation':validation,'api_ms':api_ms,'prompt_ms':prompt_ms,'parse_ms':validation['parse_ms'],'validation_ms':round((time.perf_counter()-parsed)*1000,2),'provider_http_status':200,'prompt_chars':len(contents[0]),'prompt_sha256':hashlib.sha256(contents[0].encode()).hexdigest(),'response_chars':len(raw),'finish_reason':str(response.candidates[0].finish_reason) if response.candidates else 'UNKNOWN','sdk_attempts':attempts,'timeout_ms':45000}
 
 
 
