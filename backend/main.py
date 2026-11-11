@@ -265,6 +265,120 @@ def lessons(summary: bool = False):
     return [quality.refresh_lesson(lesson_dict(r),DATA) for r in rows]
 
 
+class ConfirmPermanentDeletion(BaseModel):
+    title: str = Field(min_length=1,max_length=120)
+    revision: int = Field(ge=1)
+
+
+@app.delete('/api/lessons/{ident}',dependencies=[Depends(teacher)])
+def delete_lesson_permanently(ident: str, body: ConfirmPermanentDeletion):
+    """Irreversible teacher-confirmed deletion; preserve completed student results.
+
+    Remove only unshared original sources/media after committing the lesson
+    deletion. Never delete a source belonging to another lesson or an image
+    retained by a student's saved attempt.
+    """
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row=c.execute('SELECT * FROM lessons WHERE id=?',(ident,)).fetchone()
+        if not row:raise HTTPException(404,'Không tìm thấy bài học hoặc đã bị xóa.')
+        if row['revision']!=body.revision:raise HTTPException(409,'Bài học vừa thay đổi. Mở lại trước khi xóa.')
+        if row['title']!=body.title:raise HTTPException(422,'Tên bài xác nhận không khớp. Không xóa.')
+        if c.execute("SELECT 1 FROM jobs WHERE lesson_id=? AND state IN ('queued','running') LIMIT 1",(ident,)).fetchone():
+            raise HTTPException(409,'Bài đang có tác vụ chạy. Chỉ được xóa sau khi hoàn tất.')
+        if c.execute('SELECT 1 FROM attempts WHERE lesson_id=? AND completed IS NULL LIMIT 1',(ident,)).fetchone():
+            raise HTTPException(409,'Bài còn lượt làm bài chưa hoàn tất. Không xóa để tránh làm gián đoạn học sinh.')
+
+        document=json.loads(row['document'])
+        all_lessons=c.execute('SELECT id,document,questions FROM lessons WHERE id<>?', (ident,)).fetchall()
+        other_docs=[json.loads(r['document']) for r in all_lessons]
+        source_hash=document.get('sha256','')
+        shared_source=bool(source_hash and any(d.get('sha256')==source_hash for d in other_docs))
+        in_use=set()
+        for r,d in zip(all_lessons,other_docs):
+            in_use.update(a.get('id') for a in d.get('assets',[]))
+            in_use.update(q.get('image_asset_id') for q in json.loads(r['questions']))
+        preserved_attempts=c.execute('SELECT COUNT(*) FROM attempts WHERE lesson_id=?',(ident,)).fetchone()[0]
+        attempt_rows=c.execute('SELECT questions FROM attempts').fetchall()
+        for a in attempt_rows:
+            in_use.update(q.get('image_asset_id') for q in json.loads(a['questions']))
+        in_use.discard(None);in_use.discard('')
+        media_ids=set()
+        if not shared_source:
+            for a in document.get('assets',[]):
+                media_id=a.get('id','')
+                if len(media_id)==64 and all(ch in '0123456789abcdef' for ch in media_id) and media_id not in in_use:
+                    media_ids.add(media_id)
+
+        # Jobs can store full lesson JSON even after the lesson is removed.
+        # Delete related history; quota call timestamps and student results remain.
+        upload_ids=set();run_ids=set();old_jobs=c.execute('SELECT * FROM jobs').fetchall()
+        for job in old_jobs:
+            record=None
+            if job['result']:
+                try:record=json.loads(job['result'])
+                except (TypeError,ValueError):pass
+            if job['lesson_id']!=ident and not (isinstance(record,dict) and record.get('id')==ident):
+                continue
+            if job['state'] in ('queued','running'):
+                raise HTTPException(409,'Tác vụ liên quan đang chạy. Không thể xóa.')
+            if isinstance(record,dict):
+                run_id=record.get('generation',{}).get('run_id','')
+                if isinstance(run_id,str) and len(run_id)==32 and all(ch in '0123456789abcdef' for ch in run_id):
+                    run_ids.add(run_id)
+            if job['error']:
+                try:
+                    run_id=json.loads(job['error']).get('detail',{}).get('run_id','')
+                    if len(run_id)==32 and all(ch in '0123456789abcdef' for ch in run_id):run_ids.add(run_id)
+                except (TypeError,ValueError,AttributeError):pass
+            if job['operation'] in ('upload','restore'):
+                try:
+                    upload_id=json.loads(job['payload']).get('upload_id','')
+                    if len(upload_id)==32 and all(ch in '0123456789abcdef' for ch in upload_id):
+                        upload_ids.add(upload_id)
+                except (ValueError,TypeError):pass
+            c.execute('DELETE FROM jobs WHERE id=?',(job['id'],))
+
+        c.execute('DELETE FROM lessons WHERE id=?',(ident,))
+        # The opaque cache keys cannot identify their source document. Clear
+        # cached AI responses rather than retain deleted lesson text in a cache.
+        c.execute('DELETE FROM cache')
+        for upload_id in upload_ids:
+            c.execute("DELETE FROM upload_sessions WHERE id=? AND state='complete'",(upload_id,))
+
+    candidates=set()
+    source_listing_failed=False
+    if not shared_source and isinstance(source_hash,str) and len(source_hash)==64 and all(ch in '0123456789abcdef' for ch in source_hash):
+        try:
+            if config.object_storage():
+                candidates.update(name for name in objects.list_names('sources/'+source_hash) if name.startswith('sources/'+source_hash+'.') and Path(name).suffix in EXTENSIONS)
+            else:
+                candidates.update('sources/'+p.name for p in (DATA/'sources').glob(source_hash+'.*') if p.suffix in EXTENSIONS)
+        except objects.ObjectFailure:
+            # The database deletion succeeded; report incomplete storage cleanup.
+            source_listing_failed=True
+        candidates.add('indexes/'+source_hash+'.json')
+    for media_id in media_ids:
+        candidates.add('media/'+media_id+'.png');candidates.add('media/'+media_id+'.json')
+    for run_id in run_ids:candidates.add('qa/generation/'+run_id+'.json')
+    warnings=['Không thể liệt kê toàn bộ file nguồn S3 để dọn; cần kiểm tra thủ công.'] if source_listing_failed else []
+    for upload_id in upload_ids:
+        try:
+            if config.object_storage():
+                candidates.update(objects.list_names('upload-chunks/'+upload_id+'/'))
+            candidates.add('uploads/'+upload_id+'.part')
+        except objects.ObjectFailure:
+            warnings.append('Một số mảnh upload chưa được dọn từ S3.')
+    removed=0
+    for name in sorted(candidates):
+        try:
+            removed+=int(objects.delete_known_object(DATA,name))
+        except (objects.ObjectFailure,OSError):
+            warnings.append('Có tệp chưa được dọn khỏi lưu trữ; cần kiểm tra thủ công.')
+    return {'deleted':True,'storage_removed':removed,'storage_warnings':list(dict.fromkeys(warnings)),
+            'preserved_student_results':preserved_attempts}
+
+
 @app.post('/api/upload', dependencies=[Depends(teacher)])
 def upload(file: UploadFile = File(...)):
     upload_started=time.perf_counter()
@@ -630,7 +744,14 @@ def get_attempt(ident: str):
     if not row:
         raise HTTPException(404, 'Không tìm thấy lượt chơi.')
     result = result_data(row)
-    with db() as c:document=get_lesson(c,row['lesson_id'])['document']
+    with db() as c:
+        source=c.execute('SELECT document FROM lessons WHERE id=?',(row['lesson_id'],)).fetchone()
+    if not source and row['completed']:
+        # Completed results survive permanent deletion without exposing answers.
+        result['questions']=[];result['match_bank']=[]
+        return result
+    if not source:raise HTTPException(404,'Bài học gốc không còn tồn tại.')
+    document=json.loads(source['document'])
     result['questions'] = public_questions(json.loads(row['questions']),document)
     result['match_bank'] = sorted(q['meaning'] for q in json.loads(row['questions']) if q['kind'] == 'match')
     return result
