@@ -31,7 +31,7 @@ async function waitForJob<T>(id:string):Promise<T>{
  throw new Error('Tác vụ vẫn đang được lưu trên máy chủ. Mở lại trang để kiểm tra kết quả; không gửi lặp yêu cầu.');
 }
 async function api<T>(path:string, init:RequestInit={}):Promise<T>{
- const controller=new AbortController();const isChunkUpload=init.method==='PUT'&&/^\/uploads\/[^/]+\?offset=/.test(path);const timer=setTimeout(()=>controller.abort(),isChunkUpload?120000:20000);
+ const controller=new AbortController();const isChunkUpload=init.method==='PUT'&&/^\/uploads\/[^/]+\?offset=/.test(path);const slowRequest=isChunkUpload||init.method==='DELETE';const timer=setTimeout(()=>controller.abort(),slowRequest?120000:20000);
  const background=init.method==='POST'&&(/\/(generate|regenerate|analyze-images)$/.test(path)||/^\/uploads\/[^/]+\/complete(?:\?|$)/.test(path));
  const headers:Record<string,string>={...(init.body instanceof FormData?{}:{'Content-Type':'application/json'}),...init.headers as Record<string,string>};
  if(background){
