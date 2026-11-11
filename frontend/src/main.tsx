@@ -19,18 +19,22 @@ const vn:Record<Kind,string>={vocabulary:'Học từ vựng',quiz:'Thử thách 
 const icons={vocabulary:BookOpen,quiz:Rocket,match:Puzzle,listen:Headphones,fill:PencilLine};
 const guide:Record<Kind,string>={vocabulary:'Đọc từ tiếng Anh, nghe phát âm rồi chọn nghĩa đúng. Mỗi câu tính một lần trả lời.',quiz:'Đọc câu hỏi và chọn một đáp án. Cứ tự tin thử sức nhé!',match:'Chọn một từ ở bên trái, rồi chọn nghĩa tương ứng bên phải. Mỗi cặp tính một lần trả lời.',listen:'Bấm nghe, lắng nghe câu tiếng Anh rồi chọn đáp án. Em có thể nghe lại.',fill:'Điền từ còn thiếu vào chỗ trống ___. Kiểm tra chính tả trước khi gửi nhé!'};
 type JobState={job_id:string;state:string;result?:unknown;error?:{status:number;detail:unknown}};
+type UploadStage='starting'|'uploading'|'retrying'|'queued'|'processing'|'paused';
+type UploadProgress={filename:string;uploaded:number;total:number;stage:UploadStage;retry:number};
+const uploadMB=(bytes:number)=>(bytes/1_000_000).toFixed(1);
 function errorText(detail:unknown):string{if(typeof detail==='string')return detail;const d=detail as {message?:string;stage?:number;reason_code?:string;diagnostics?:unknown};return d?.message?('Công đoạn '+d.stage+' · '+d.reason_code+': '+d.message+' '+JSON.stringify(d.diagnostics||{})):'Yêu cầu chưa hợp lệ. Vui lòng kiểm tra dữ liệu.';}
-async function waitForJob<T>(id:string):Promise<T>{
+async function waitForJob<T>(id:string,onState?:(state:string)=>void):Promise<T>{
  const started=Date.now();
  while(Date.now()-started<300000){
   const job=await api<JobState>('/jobs/'+id);
+  onState?.(job.state);
   if(job.state==='succeeded'){localStorage.removeItem('adventure.pendingJob');localStorage.removeItem('adventure.pendingRequest');return job.result as T;}
   if(['failed','interrupted'].includes(job.state)){localStorage.removeItem('adventure.pendingJob');localStorage.removeItem('adventure.pendingRequest');throw new Error(errorText(job.error?.detail));}
   await new Promise(resolve=>setTimeout(resolve,1200));
  }
  throw new Error('Tác vụ vẫn đang được lưu trên máy chủ. Mở lại trang để kiểm tra kết quả; không gửi lặp yêu cầu.');
 }
-async function api<T>(path:string, init:RequestInit={}):Promise<T>{
+async function api<T>(path:string, init:RequestInit={},onJobState?:(state:string)=>void):Promise<T>{
  const controller=new AbortController();const isChunkUpload=init.method==='PUT'&&/^\/uploads\/[^/]+\?offset=/.test(path);const slowRequest=isChunkUpload||init.method==='DELETE';const timer=setTimeout(()=>controller.abort(),slowRequest?120000:20000);
  const background=init.method==='POST'&&(/\/(generate|regenerate|analyze-images)$/.test(path)||/^\/uploads\/[^/]+\/complete(?:\?|$)/.test(path));
  const headers:Record<string,string>={...(init.body instanceof FormData?{}:{'Content-Type':'application/json'}),...init.headers as Record<string,string>};
@@ -42,11 +46,13 @@ async function api<T>(path:string, init:RequestInit={}):Promise<T>{
  try{
   const response=await fetch('/api'+path,{...init,credentials:'same-origin',signal:controller.signal,headers});let data;try{data=await response.json();}catch{throw new Error('Máy chủ/proxy trả HTTP '+response.status+' không phải JSON. Bản nháp được giữ; kiểm tra tác vụ đã lưu trước khi gửi lại.');}
   if(!response.ok){if(background)localStorage.removeItem('adventure.pendingRequest');throw new Error(errorText(data.detail));}
-  if(response.status===202&&data.job_id){clearTimeout(timer);localStorage.setItem('adventure.pendingJob',data.job_id);return await waitForJob<T>(data.job_id);}
+  if(response.status===202&&data.job_id){clearTimeout(timer);localStorage.setItem('adventure.pendingJob',data.job_id);return await waitForJob<T>(data.job_id,onJobState);}
   return data;
  }catch(e){if(e instanceof TypeError || (e instanceof DOMException&&e.name==='AbortError'))throw new Error('Mất kết nối hoặc quá thời gian chờ. Tác vụ và bản nháp đã lưu được giữ; mở lại trang để kiểm tra trước khi gửi lại.');throw e;}finally{clearTimeout(timer);}
 }
-async function uploadDocument(file:File,restoreId?:string):Promise<Lesson>{
+async function uploadDocument(file:File,restoreId?:string,onProgress?:(progress:UploadProgress)=>void):Promise<Lesson>{
+ const report=(uploaded:number,stage:UploadStage,retry=0)=>onProgress?.({filename:file.name,uploaded,total:file.size,stage,retry});
+ report(0,'starting');
  const fingerprint=[file.name,file.size,file.lastModified,restoreId||''].join(':');let pending:{fingerprint:string;id:string}|null=null;
  try{pending=JSON.parse(localStorage.getItem('adventure.pendingUpload')||'null');}catch{/* Ignore stale browser state. */}
  let id=pending?.fingerprint===fingerprint?pending.id:'';
@@ -55,6 +61,7 @@ async function uploadDocument(file:File,restoreId?:string):Promise<Lesson>{
  // already enforces an upper bound (2 MiB), not an exact chunk size.
  const chunkBytes=1024*1024;
  const state=await api<{offset:number}>('/uploads/'+id);let offset=state.offset;
+ report(offset,'uploading');
  let failures=0;
  while(offset<file.size){
   try{
@@ -62,18 +69,26 @@ async function uploadDocument(file:File,restoreId?:string):Promise<Lesson>{
    const next=await api<{offset:number}>('/uploads/'+id+'?offset='+offset,{method:'PUT',headers:{'Content-Type':'application/octet-stream'},body:piece});
    if(next.offset<=offset||next.offset>file.size)throw new Error('Máy chủ trả vị trí upload không hợp lệ.');
    offset=next.offset;failures=0;
+   report(offset,'uploading');
   }catch(e){
    failures++;
+   report(offset,'retrying',failures);
    if(failures>=4)throw new Error('Upload bị gián đoạn tại '+Math.round(offset/1024/1024*10)/10+' MB. Dữ liệu đã tải được giữ trên máy chủ; hãy chọn lại chính file này để tiếp tục. '+(e as Error).message);
    await new Promise(resolve=>setTimeout(resolve,1000*failures));
    try{
     const remote=await api<{offset:number}>('/uploads/'+id);
     if(remote.offset<0||remote.offset>file.size)throw new Error('Vị trí upload không hợp lệ.');
     offset=remote.offset;
+    report(offset,'retrying',failures);
    }catch{/* Retry will recheck on conflict; never discard the persisted session. */}
   }
  }
- const lesson=await post<Lesson>('/uploads/'+id+'/complete'+(restoreId?'?restore_ident='+encodeURIComponent(restoreId):''));
+ report(offset,'queued');
+ const completePath='/uploads/'+id+'/complete'+(restoreId?'?restore_ident='+encodeURIComponent(restoreId):'');
+ const lesson=await api<Lesson>(completePath,{method:'POST',body:'{}'},state=>{
+  if(state==='running')report(offset,'processing');
+  else if(state==='queued')report(offset,'queued');
+ });
  localStorage.removeItem('adventure.pendingUpload');return lesson;
 }
 const post=<T,>(path:string,body:unknown={})=>api<T>(path,{method:'POST',body:JSON.stringify(body)});
@@ -86,6 +101,7 @@ function App(){
 function Teacher(){
  const [auth,setAuth]=useState<boolean|null>(null),[code,setCode]=useState(''),[error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState('');
  const [tab,setTab]=useState('overview'),[mobile,setMobile]=useState(false),[lessons,setLessons]=useState<Lesson[]>([]),[results,setResults]=useState<Result[]>([]),[active,setActive]=useState<Lesson|null>(null),[dirty,setDirty]=useState(false),[query,setQuery]=useState('');
+ const [uploadProgress,setUploadProgress]=useState<UploadProgress|null>(null);
  const [visualOnly,setVisualOnly]=useState(false);
  const [trace,setTrace]=useState<{run_id?:string;events:{stage:number;name?:string;status:string;duration_ms:number|null;details?:unknown}[]}>({events:[]});
  useEffect(()=>{if(active&&!busy)api<typeof trace>('/lessons/'+active.id+'/generation-status').then(setTrace).catch(()=>{});},[active?.id,active?.revision,busy]);
@@ -111,18 +127,39 @@ function Teacher(){
    setNotice('Đã xóa vĩnh viễn bài học. '+result.storage_removed+' tệp không còn được sử dụng đã được giải phóng.'+(result.storage_warnings.length?' Một số tệp chưa dọn được; cần kiểm tra lưu trữ.':''));
   });
  }
- async function upload(file:File){await run('Đang đọc tài liệu',async()=>{if(file.size>100*1024*1024)throw new Error('File tối đa 100 MB.');if(!/\.(pptx|pdf|docx|txt)$/i.test(file.name))throw new Error('Chỉ hỗ trợ PPTX, PDF, DOCX, TXT.');const l=await uploadDocument(file);await load();open(l);setNotice('Đã trích xuất tài liệu. Kiểm tra nội dung nguồn trước khi tạo câu hỏi.');});}
+ async function upload(file:File){if(busy)return;setUploadProgress(null);await run('Đang tải tài liệu',async()=>{
+  if(file.size>100*1024*1024)throw new Error('File tối đa 100 MB.');
+  if(!/\.(pptx|pdf|docx|txt)$/i.test(file.name))throw new Error('Chỉ hỗ trợ PPTX, PDF, DOCX, TXT.');
+  try{
+   const l=await uploadDocument(file,undefined,setUploadProgress);
+   setUploadProgress(null);await load();await open(l);
+   setNotice('Đã trích xuất tài liệu. Kiểm tra nội dung nguồn trước khi tạo câu hỏi.');
+  }catch(e){setUploadProgress(p=>p?{...p,stage:'paused'}:null);throw e;}
+ });}
  useEffect(()=>{if(!dirty)return;const f=(e:BeforeUnloadEvent)=>{e.preventDefault();};window.addEventListener('beforeunload',f);return()=>window.removeEventListener('beforeunload',f);},[dirty]);
  const published=lessons.filter(l=>l.state==='published').length, completed=results.filter(r=>r.completed&&r.score!==null);
  const avg=completed.length?Math.round(completed.reduce((a,r)=>a+(r.score??0),0)/completed.length):0;
  const cards=lessons.filter(l=>l.title.toLowerCase().includes(query.toLowerCase()));
  if(auth===null)return <div className="loading-page"><Owl/><LoaderCircle className="spin"/> Đang mở hành trình…</div>;
  if(!auth)return <div className="login-page"><div className="login-art"><Brand/><div><span className="eyebrow">DÀNH CHO NGƯỜI TRUYỀN CẢM HỨNG</span><h1>Mỗi bài giảng,<br/>một chuyến phiêu lưu.</h1><p>Cùng Ollie biến kiến thức tiếng Anh thành những khoảnh khắc “Con hiểu rồi!”</p><Owl large/></div><span>English AI Adventure · Lớp 3–5</span></div><div className="login-form"><a href="#/play" className="text-link">Em là học sinh <ArrowRight size={16}/></a><form onSubmit={e=>{e.preventDefault();run('Đang đăng nhập',async()=>{await post('/login',{code});setAuth(true);await load();});}}><span className="pill"><ShieldCheck size={15}/> Không gian giáo viên</span><h2>Chào thầy cô!</h2><p>Nhập mã giáo viên để quản lý bài giảng và xem tiến bộ của các em.</p><label>Mã truy cập giáo viên<input type="password" autoComplete="current-password" value={code} onChange={e=>setCode(e.target.value)} required placeholder="Nhập mã truy cập"/></label><small>Mã được tạo trên máy chủ, trong file<br/><code>backend/data/teacher-access.txt</code></small>{error&&<div role="alert" className="alert error">{error}</div>}<button className="btn primary full" disabled={!!busy}>{busy||'Vào không gian giáo viên'}<ArrowRight size={18}/></button></form><span className="privacy"><ShieldCheck size={15}/> Không yêu cầu thông tin cá nhân học sinh</span></div></div>;
- return <div className="teacher-shell"><input ref={restoreRef} aria-label="Khôi phục tài liệu gốc" type="file" hidden accept=".pptx,.pdf,.docx,.txt" onChange={e=>{const f=e.target.files?.[0];if(f&&active)run('Đang khôi phục nguồn gốc',async()=>{const result=await uploadDocument(f,active.id);setActive(result);setDirty(false);await load();setNotice('Đã khôi phục đúng tài liệu gốc. Cần kiểm định ảnh, chọn ảnh cho câu và duyệt lại trước khi xuất bản.');});e.target.value='';}}/><input ref={fileRef} aria-label="Tải tài liệu mới" type="file" hidden accept=".pptx,.pdf,.docx,.txt" onChange={e=>{const f=e.target.files?.[0];if(f)upload(f);e.target.value='';}}/>
+ return <div className="teacher-shell"><input ref={restoreRef} aria-label="Khôi phục tài liệu gốc" type="file" hidden accept=".pptx,.pdf,.docx,.txt" onChange={e=>{const f=e.target.files?.[0];if(f&&active)run('Đang khôi phục nguồn gốc',async()=>{setUploadProgress(null);const result=await uploadDocument(f,active.id,setUploadProgress);setUploadProgress(null);setActive(result);setDirty(false);await load();setNotice('Đã khôi phục đúng tài liệu gốc. Cần kiểm định ảnh, chọn ảnh cho câu và duyệt lại trước khi xuất bản.');});e.target.value='';}}/><input ref={fileRef} aria-label="Tải tài liệu mới" type="file" hidden accept=".pptx,.pdf,.docx,.txt" onChange={e=>{const f=e.target.files?.[0];if(f)upload(f);e.target.value='';}}/>
  <button className="mobile-menu icon-btn" aria-label="Mở menu" onClick={()=>setMobile(!mobile)}><Menu/></button>
  <aside className={'sidebar '+(mobile?'open':'')}><Brand/><span className="workspace-label">KHÔNG GIAN GIÁO VIÊN</span><nav>{[['overview','Tổng quan',LayoutDashboard],['library','Thư viện bài học',Library],['upload','Tạo bài học',Plus],['results','Kết quả học sinh',BarChart3]].map(([id,text,Icon])=>{const I=Icon as typeof BookOpen;return <button key={id as string} className={tab===id?'active':''} onClick={()=>navigate(id as string)}><I size={20}/>{text as string}{id==='library'&&<span className="nav-count">{lessons.length}</span>}</button>;})}</nav><div className="sidebar-help"><Owl/><strong>Một chút AI.<br/>Thật nhiều cảm hứng.</strong><p>Thầy cô luôn là người quyết định nội dung cuối cùng.</p></div><a className="student-link" href="#/play"><GraduationCap size={19}/> Không gian học sinh <ArrowRight size={16}/></a><div className="profile"><span className="avatar">GV</span><div><strong>Giáo viên</strong><small>English AI Adventure</small></div><button className="icon-btn" aria-label="Đăng xuất" onClick={()=>run('Đăng xuất',async()=>{await post('/logout');setAuth(false);})}><LogOut size={18}/></button></div></aside>
  <main className="teacher-main"><header className="topbar"><div><span>Không gian giáo viên</span><ChevronRight size={14}/><strong>{tab==='editor'?'Soạn bài học':tab==='library'?'Thư viện bài học':tab==='results'?'Kết quả học sinh':tab==='upload'?'Tạo bài học':'Tổng quan'}</strong></div><span className="local-tag"><span/> Lưu trên máy chủ của bạn</span></header>
- {error&&<div className="alert error" role="alert">{error}<button aria-label="Đóng thông báo" onClick={()=>setError('')}><X size={16}/></button></div>}{notice&&<div className="alert success" role="status">{notice}<button aria-label="Đóng thông báo" onClick={()=>setNotice('')}><X size={16}/></button></div>}{busy&&<div className="busy-banner" role="status"><LoaderCircle className="spin" size={17}/>{busy}…</div>}
+ {error&&<div className="alert error" role="alert">{error}<button aria-label="Đóng thông báo" onClick={()=>setError('')}><X size={16}/></button></div>}{notice&&<div className="alert success" role="status">{notice}<button aria-label="Đóng thông báo" onClick={()=>setNotice('')}><X size={16}/></button></div>}{busy&&!uploadProgress&&<div className="busy-banner" role="status"><LoaderCircle className="spin" size={17}/>{busy}…</div>}
+ {uploadProgress&&<section className="upload-progress" aria-label="Tiến độ xử lý tài liệu">
+  <div className="upload-progress-head"><div className="upload-progress-heading">
+   {(uploadProgress.stage!=='paused')&&<LoaderCircle className="spin" size={20}/>}
+   <strong>{uploadProgress.stage==='starting'?'Đang chuẩn bị phiên tải lên':uploadProgress.stage==='uploading'?'Đang tải tài liệu lên máy chủ':uploadProgress.stage==='retrying'?'Kết nối gián đoạn – đang tiếp tục':uploadProgress.stage==='queued'?'Đã tải xong – đang chờ xử lý':uploadProgress.stage==='processing'?'Máy chủ đang đọc và trích xuất tài liệu':'Tải lên tạm dừng'}</strong>
+  </div>
+  <strong className="upload-percent">{Math.min(100,Math.floor(uploadProgress.uploaded/Math.max(1,uploadProgress.total)*100))}%</strong></div>
+  <div className="upload-file" title={uploadProgress.filename}>{uploadProgress.filename}</div>
+  <progress className="upload-meter" aria-label="Phần tài liệu đã được máy chủ xác nhận" value={uploadProgress.uploaded} max={Math.max(1,uploadProgress.total)}/>
+  <div className="upload-progress-foot"><span>{uploadMB(uploadProgress.uploaded)} / {uploadMB(uploadProgress.total)} MB đã xác nhận</span>
+   <span>{uploadProgress.stage==='retrying'?'Đang nối lại · lần '+uploadProgress.retry+'/3':uploadProgress.stage==='processing'?'Đang xử lý slide, chữ và hình ảnh':uploadProgress.stage==='queued'?'Không cần tải lại file':uploadProgress.stage==='paused'?'Chọn lại đúng file để tiếp tục':'Có thể mất vài phút khi dùng 4G'}</span></div>
+  {(uploadProgress.stage==='queued'||uploadProgress.stage==='processing')&&<p className="upload-note">File đã được tải lên 100%. Giai đoạn này chưa có phần trăm trích xuất; hệ thống đang xử lý trên máy chủ. Không cần gửi lại tài liệu.</p>}
+  {uploadProgress.stage==='paused'&&<p className="upload-note">Phần đã tải được giữ lại. Chọn đúng tệp một lần nữa để hệ thống tiếp tục từ vị trí đã lưu.</p>}
+ </section>}
  {tab==='overview'&&<><div className="page-heading"><div><span className="eyebrow">CÙNG NHAU KHƠI MỞ TRI THỨC</span><h1>Hôm nay, mình khám phá gì? <span className="sun">✺</span></h1><p>Một bài giảng quen thuộc. Nhiều cách học thật mới.</p></div><button className="btn primary" disabled={!!busy} onClick={()=>navigate('upload')}><Plus size={18}/> Tạo bài học mới</button></div>
  <section className="hero"><div className="hero-copy"><span className="pill light"><Sparkles size={14}/> TRỢ LÝ NHỎ CỦA THẦY CÔ</span><h2>Từ bài giảng của thầy cô,<br/>đến hành trình của các em.</h2><p>Tải tài liệu, để AI gợi ý hoạt động. Thầy cô kiểm duyệt,<br className="desktop"/> các em tự tin khám phá tiếng Anh theo cách riêng.</p><button className="btn cream" onClick={()=>navigate('upload')}>Bắt đầu từ bài giảng <ArrowRight size={17}/></button></div><div className="hero-art"><span className="float-note note-one"><BookOpen size={17}/> Hello, adventure!</span><span className="orbit"/><Owl large/><span className="float-note note-two"><Star size={16} fill="currentColor"/> Learn · Play · Grow</span><span className="art-star s1">✦</span><span className="art-star s2">✦</span></div></section>
  <section className="stats">{[[BookOpen,lessons.length,'Bài học trong thư viện','mint'],[Rocket,published,'Bài học đã xuất bản','peach'],[GraduationCap,completed.length,'Lượt chơi hoàn thành','lavender'],[Trophy,avg+'%','Điểm trung bình','yellow']].map(([Icon,val,text,color])=>{const I=Icon as typeof BookOpen;return <div className="stat" key={text as string}><span className={'stat-icon '+color}><I size={23}/></span><div><strong>{val as string}</strong><span>{text as string}</span></div></div>})}</section>
