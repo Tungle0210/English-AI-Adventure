@@ -74,7 +74,7 @@ def validate_output(raw, document, settings, root):
     return Generated(questions=accepted),info
 
 
-def generate(document, settings, media_root=None):
+def generate(document, settings, media_root=None, on_transient_retry=None):
     cfg = configuration()
     if not cfg.get('GEMINI_API_KEY'):
         raise RuntimeError('MISSING_KEY')
@@ -110,8 +110,9 @@ def generate(document, settings, media_root=None):
     prompt_ms=round((time.perf_counter()-prompt_started)*1000,2)
     started=time.perf_counter()
     attempts=0
-    # Retry only a transient provider 503 once. Never retry quota, auth,
-    # validation or timeout failures, which may already have consumed quota.
+    # A second provider attempt is opt-in and must reserve its own quota slot.
+    # The local budget enforces at least 30 seconds between actual API calls.
+    # Never retry quota, auth, validation or uncertain timeout failures.
     try:
         with genai.Client(api_key=cfg['GEMINI_API_KEY'], http_options=types.HttpOptions(timeout=45000, retry_options=types.HttpRetryOptions(attempts=1))) as client:
             while True:
@@ -121,9 +122,10 @@ def generate(document, settings, media_root=None):
                         temperature=0.2, max_output_tokens=min(12000,max(4000,settings.count*850)), response_mime_type='application/json', response_json_schema=transport_schema()))
                     break
                 except Exception as error:
-                    if getattr(error, 'code', None) != 503 or attempts >= 2:
+                    if getattr(error, 'code', None) != 503 or attempts >= 2 or on_transient_retry is None:
                         raise
-                    time.sleep(2)
+                    time.sleep(31)
+                    on_transient_retry()
     except Exception as error:
         error.pipeline_metrics={'prompt_ms':prompt_ms,'prompt_chars':len(contents[0]),'prompt_sha256':hashlib.sha256(contents[0].encode()).hexdigest(),'api_ms':round((time.perf_counter()-started)*1000,2),'sdk_attempts':attempts,'timeout_ms':45000}
         raise
