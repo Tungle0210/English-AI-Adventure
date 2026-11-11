@@ -372,7 +372,7 @@ def delete_lesson_permanently(ident: str, body: ConfirmPermanentDeletion):
     removed=0
     for name in sorted(candidates):
         try:
-            objects.delete_known_object(DATA,name);removed+=1
+            removed+=int(objects.delete_known_object(DATA,name))
         except (objects.ObjectFailure,OSError):
             warnings.append('Có tệp chưa được dọn khỏi lưu trữ; cần kiểm tra thủ công.')
     return {'deleted':True,'storage_removed':removed,'storage_warnings':list(dict.fromkeys(warnings)),
