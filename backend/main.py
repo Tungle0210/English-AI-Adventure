@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from .content import ROOT, MAX_BYTES, EXTENSIONS, read_document
 from .schemas import Item, Editable, LessonUpdate, GenerateRequest, verify_sources
 from . import ai
-from . import media, quality, config
+from . import media, quality, config, database, objects
 from .jobs import Queue
 from .storage import single_writer
 
@@ -37,6 +37,9 @@ def now():
 
 @contextmanager
 def db():
+    if config.postgres():
+        with database.connect() as connection:yield connection
+        return
     connection = sqlite3.connect(DB, timeout=15)
     connection.row_factory = sqlite3.Row
     try:
@@ -55,17 +58,17 @@ def check_ai_budget(c):
 def init_db():
     DATA.mkdir(parents=True, exist_ok=True)
     (DATA / 'uploads').mkdir(exist_ok=True)
+    if config.postgres():
+        with db() as c:database.ready(c)
+        return
     codefile = DATA / 'teacher-access.txt'
-    if not codefile.exists():
-        codefile.write_text(secrets.token_urlsafe(18), encoding='utf-8')
     with db() as c:
-        c.executescript('''
-        CREATE TABLE IF NOT EXISTS lessons(id TEXT PRIMARY KEY, title TEXT, grade INTEGER, state TEXT, code TEXT UNIQUE, revision INTEGER, document TEXT, questions TEXT, origin TEXT, updated TEXT);
-        CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, expires REAL);
-        CREATE TABLE IF NOT EXISTS cache(key TEXT PRIMARY KEY, payload TEXT);
-        CREATE TABLE IF NOT EXISTS calls(at REAL);
-        CREATE TABLE IF NOT EXISTS attempts(id TEXT PRIMARY KEY, lesson_id TEXT, title TEXT, mode TEXT, questions TEXT, responses TEXT, started TEXT, completed TEXT);
-        ''')
+        from .schema import CORE
+        c.executescript(CORE)
+        c.executescript(database.EXTRA_SCHEMA)
+        has_hash=c.execute("SELECT 1 FROM app_settings WHERE key='teacher_auth'").fetchone()
+    if not codefile.exists() and not has_hash:
+        codefile.write_text(secrets.token_urlsafe(18), encoding='utf-8')
 
 
 def lesson_dict(row):
@@ -131,13 +134,15 @@ async def lifespan(app):
         DATA.mkdir(parents=True,exist_ok=True)
         yield
         return
-    with single_writer(DATA):
+    from contextlib import nullcontext
+    with (nullcontext() if config.postgres() else single_writer(DATA)):
         init_db()
-        if not config.production():
+        if not config.production() and not config.postgres():
             seed()
             from .migration import audit_legacy
             audit_legacy(DATA, DB)
-        job_queue=Queue(db,dispatch_job)
+        from .pgjobs import PostgresQueue
+        job_queue=(PostgresQueue if config.postgres() else Queue)(db,dispatch_job)
         job_queue.start()
         try:yield
         finally:job_queue.close()
@@ -201,7 +206,14 @@ def login(body: Login, request: Request, response: Response):
     login_attempts[host] = recent
     if len(recent) >= 5:
         raise HTTPException(429, 'Thử quá nhiều lần. Hãy chờ một phút.')
-    if not secrets.compare_digest(body.code, (DATA / 'teacher-access.txt').read_text(encoding='utf-8').strip()):
+    if config.postgres():
+        with db() as c:matches=database.teacher_matches(c,body.code)
+    else:
+        with db() as c:has_hash=c.execute("SELECT 1 FROM app_settings WHERE key='teacher_auth'").fetchone()
+        if has_hash:
+            with db() as c:matches=database.teacher_matches(c,body.code)
+        else:matches=secrets.compare_digest(body.code,(DATA/'teacher-access.txt').read_text(encoding='utf-8').strip())
+    if not matches:
         recent.append(time.time())
         raise HTTPException(401, 'Mã giáo viên chưa đúng.')
     token = secrets.token_urlsafe(32)
@@ -233,9 +245,16 @@ def teacher_info():
 
 
 @app.get('/api/lessons', dependencies=[Depends(teacher)])
-def lessons():
+def lessons(summary: bool = False):
     with db() as c:
         rows = c.execute('SELECT * FROM lessons ORDER BY updated DESC').fetchall()
+    if summary:
+        result=[]
+        for row in rows:
+            item=lesson_dict(row);doc=item['document']
+            item['document']={'label':doc.get('label','Phần'),'sections':[{'number':s['number'],'text':'','images':s.get('images',0)} for s in doc.get('sections',[])],'assets':[],'warnings':[]}
+            item['detail_loaded']=False;result.append(item)
+        return result
     return [quality.refresh_lesson(lesson_dict(r),DATA) for r in rows]
 
 
@@ -262,6 +281,7 @@ def upload(file: UploadFile = File(...)):
     import shutil
     (DATA/'sources').mkdir(exist_ok=True)
     shutil.copyfile(path,DATA/'sources'/(digest.hexdigest()+suffix))
+    objects.publish(DATA,'sources/'+digest.hexdigest()+suffix)
     retained_at=time.perf_counter()
     try:
         document = read_document(path,media_root=DATA)
@@ -418,12 +438,16 @@ def traced_generate_core(ident: str, settings: GenerateRequest):
     finally:
         record['total_ms']=round((time.perf_counter()-started)*1000,2)
         (folder/(run_id+'.json')).write_text(json.dumps(record,ensure_ascii=False),encoding='utf-8')
+        objects.publish(DATA,'qa/generation/'+run_id+'.json')
 
 
 @app.get('/api/lessons/{ident}/generation-status',dependencies=[Depends(teacher)])
 def generation_status(ident: str):
     with db() as c:get_lesson(c,ident)
     folder=DATA/'qa/generation'
+    if config.object_storage():
+        for name in objects.list_names('qa/generation/'):
+            path=objects.ensure(DATA,name)
     files=sorted(folder.glob('*.json'),key=lambda p:p.stat().st_mtime,reverse=True) if folder.exists() else []
     for path in files:
         data=json.loads(path.read_text(encoding='utf-8'))
@@ -435,12 +459,14 @@ def generation_status(ident: str):
 def generation_displayed(ident: str,run_id: str):
     if len(run_id)!=32 or any(c not in '0123456789abcdef' for c in run_id):raise HTTPException(422,'Run ID không hợp lệ.')
     path=DATA/'qa/generation'/(run_id+'.json')
+    if config.object_storage() and objects.head('qa/generation/'+run_id+'.json'):objects.ensure(DATA,'qa/generation/'+run_id+'.json')
     if not path.exists():raise HTTPException(404,'Không có lượt tạo này.')
     data=json.loads(path.read_text(encoding='utf-8'))
     if data['lesson_id']!=ident:raise HTTPException(404,'Không có lượt tạo này.')
     for e in data['events']:
         if e['stage']==9 and e['status']=='PENDING':e.update(status='PASS',duration_ms=0,note='Trình duyệt xác nhận đã render danh sách câu hỏi')
     path.write_text(json.dumps(data,ensure_ascii=False),encoding='utf-8')
+    objects.publish(DATA,'qa/generation/'+run_id+'.json')
     return {'status':'ok'}
 
 
@@ -608,7 +634,7 @@ def get_media(ident: str,request: Request):
             published=c.execute("SELECT * FROM lessons WHERE state='published'").fetchall()
             authorized=any(any(q.get('image_asset_id')==ident for q in quality.eligible(lesson_dict(row),DATA)) for row in published)
             if not authorized:
-                authorized=bool(c.execute("SELECT 1 FROM attempts,json_each(attempts.questions) q WHERE json_extract(q.value,'$.image_asset_id')=? AND json_extract(q.value,'$.approved')=1 LIMIT 1",(ident,)).fetchone())
+                authorized=database.media_in_attempt(c,ident)
         if not authorized:raise HTTPException(404,'Ảnh chưa được xuất bản cho học sinh.')
     if not media.asset_info(DATA,ident):raise HTTPException(404,'Ảnh không tồn tại hoặc đã thay đổi.')
     return FileResponse(DATA/'media'/(ident+'.png'),media_type='image/png',headers={'Cache-Control':'private, max-age=0','Content-Security-Policy':"default-src 'none'"})
@@ -835,7 +861,7 @@ def upload_state(ident,c):
     path=DATA/'uploads'/(row['id']+'.part')
     state=dict(row)
     # A crash after fsync but before the SQLite commit can leave acknowledged bytes ahead.
-    if state['state']=='uploading':
+    if state['state']=='uploading' and not config.object_storage():
         if not path.exists():raise HTTPException(409,'File tạm không tồn tại; cần chọn tải lại.')
         actual=path.stat().st_size
         if actual>state['size']:raise HTTPException(409,'File tạm sai kích thước; không tiếp tục trích xuất.')
@@ -861,7 +887,9 @@ async def upload_chunk(ident: str,offset: int,request: Request):
         c.execute('BEGIN IMMEDIATE');state,path=upload_state(ident,c)
         if state['state']!='uploading' or state['offset']!=offset:raise HTTPException(409,'Vị trí tải đã thay đổi; đọc trạng thái để tiếp tục, không gửi lặp dữ liệu.')
         if offset+len(chunk)>state['size']:raise HTTPException(413,'Dữ liệu vượt kích thước đã khai báo.')
-        with path.open('ab') as f:f.write(chunk);f.flush();os.fsync(f.fileno())
+        if config.object_storage():objects.put_bytes('upload-chunks/'+ident+'/'+str(offset),bytes(chunk))
+        else:
+            with path.open('ab') as f:f.write(chunk);f.flush();os.fsync(f.fileno())
         c.execute('UPDATE upload_sessions SET offset=? WHERE id=?',(offset+len(chunk),ident))
     return {'upload_id':ident,'offset':offset+len(chunk)}
 
@@ -872,7 +900,7 @@ def complete_upload(ident: str,request: Request,restore_ident: str = ""):
         state,path=upload_state(ident,c)
         if state['offset']!=state['size']:raise HTTPException(409,'File chưa tải đủ; tiếp tục từ offset đã lưu.')
         if state['state']=='complete':
-            done=c.execute("SELECT id FROM jobs WHERE state='succeeded' AND json_extract(payload,'$.upload_id')=? ORDER BY updated DESC LIMIT 1",(ident,)).fetchone()
+            done=database.completed_upload_job(c,ident)
             if done:return JSONResponse(status_code=202,content={'job_id':done['id'],'state':'succeeded'})
             raise HTTPException(409,'File đã xử lý nhưng job bị gián đoạn. Kiểm tra thư viện, không tự tạo bản sao.')
     if restore_ident:
@@ -889,6 +917,7 @@ def dispatch_job(operation,ident,payload):
         upload_id=payload.get('upload_id',ident.removeprefix('upload:'))
         with db() as c:state,path=upload_state(upload_id,c)
         try:
+            if config.object_storage():path=objects.materialize_upload(DATA,upload_id,state['size'])
             with path.open('rb') as f:
                 file=UploadFile(file=f,filename=state['filename'])
                 result=restore_source(ident,file) if operation=='restore' else upload(file)

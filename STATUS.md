@@ -1,5 +1,15 @@
 # Trạng thái English AI Adventure
 
+## Neon/PostgreSQL + S3 — kiểm thử và chuẩn bị migration (11/11/2026)
+
+**Chưa chuyển production, chưa push/deploy/bật billing.** Kết nối pooled/direct thật TLS READONLY PASS; adapterpoolNeon PASS sau sửa startupoptions. S3 QA940 byte vàPPTX70 MB thật SHA256 khớp/Private/cleanupPASS. Gemini models.getPASS, khôngsinh nội dung.
+
+Diễn tập:7 bảng/18 bài/157 lượt/1 job,998 tệp, PostgreSQL WASMlocal + S3 mô phỏng, rollbackSQLite/filechecksumPASS; khônggiảlàmNeonproduction.84 backendtests và25 ChromeHTTPSlocalPASS, buildNetlifyPASS. OriginalSQLite/media7 bảngkhông đổi.
+
+[Hướng dẫn Neon và cutover có guard](docs/NEON_MIGRATION.md) · [QA PASS/FAIL/NOT_TESTED](docs/NEON_QA.md). NativeLinux/RenderRAMCPU/migrationghi/jobcloud/70 MBquaRenderthật:NOT_TESTED. Render Freekhông cóDisk/Shell;render.yamlđãchuẩnbịFree/PG/S3 nhưngchưaápdụng. Cloudruntime mặcđịnh tắt chođến khiHARRYphê duyệt. CácphầnDisk/SQLitecũ bên dưới làlịch sử, không dùngchúngđể cutoverNeon.
+
+
+
 ## Chuẩn bị production GitHub + Netlify + Render — 11/11/2026
 
 Đã chuẩn bị cấu hình environment/fallback, disk path, cookie/Origin/Host/CSRF, jobSQLite+polling, upload2MB/phần, backup/restore không ghi đè và release mã nguồn. Giữ giao diện, bài học và lịch sử; chưa push/triển khai/bật billing.

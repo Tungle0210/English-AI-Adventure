@@ -10,9 +10,8 @@ class Queue:
 
     def initialize(self):
         with self.db() as c:
-            c.executescript('''CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,operation TEXT,lesson_id TEXT,payload TEXT,fingerprint TEXT,idempotency_key TEXT UNIQUE,state TEXT,result TEXT,error TEXT,created REAL,updated REAL);
-            CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state,created);
-            CREATE TABLE IF NOT EXISTS upload_sessions(id TEXT PRIMARY KEY,filename TEXT,size INTEGER,offset INTEGER,state TEXT,created REAL);''')
+            from .schema import QUEUE
+            c.executescript(QUEUE)
             c.execute("UPDATE jobs SET state='interrupted',error=?,updated=? WHERE state='running'",(json.dumps({'status':409,'detail':'Máy chủ khởi động lại khi tác vụ đang chạy. Kiểm tra bản nháp trước khi gửi lại; hệ thống không tự gọi AI lần nữa.'}),time.time()))
 
     def start(self):

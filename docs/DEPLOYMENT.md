@@ -1,4 +1,6 @@
-# Triển khai English AI Adventure: GitHub → Netlify + Render
+# Hướng dẫn cũ: SQLite + Persistent Disk
+
+**Đây là bản lịch sử dùng gói có Disk. Hạ tầng Neon/Render Free hiện tại xem [NEON_MIGRATION.md](NEON_MIGRATION.md); không chạy hướng dẫn Disk này cho Free.**
 
 Tài liệu dành cho HARRY. Đây là **bản chuẩn bị**, chưa có website production được triển khai. Không có thao tác push, tạo dịch vụ, mua gói hay bật billing được thực hiện tự động.
 

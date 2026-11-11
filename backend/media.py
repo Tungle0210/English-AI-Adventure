@@ -9,6 +9,7 @@ import subprocess
 import xml.etree.ElementTree as ET
 from zipfile import ZipFile
 from PIL import Image, ImageOps
+from . import objects,config
 
 ROOT = Path(__file__).resolve().parents[1]
 NS = {'p':'http://schemas.openxmlformats.org/presentationml/2006/main','a':'http://schemas.openxmlformats.org/drawingml/2006/main','r':'http://schemas.openxmlformats.org/officeDocument/2006/relationships','w':'http://schemas.openxmlformats.org/wordprocessingml/2006/main','wp':'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'}
@@ -49,11 +50,15 @@ def store_image(raw, root, document_hash, source, origin, **metadata):
         previous=json.loads(sidecar.read_text(encoding='utf-8'))
         if previous.get('pixel_hash')==pixel_hash:info=previous
     sidecar.write_text(json.dumps(info,ensure_ascii=False,indent=2),encoding='utf-8')
+    objects.publish(root,'media/'+ident+'.png');objects.publish(root,'media/'+ident+'.json');objects.register_asset(root,document_hash,ident)
     return info
 
 
 def asset_info(root, ident):
     if len(ident)!=64 or any(c not in '0123456789abcdef' for c in ident):return None
+    if config.object_storage():
+        try:objects.ensure(root,'media/'+ident+'.json');objects.ensure(root,'media/'+ident+'.png')
+        except objects.ObjectFailure:return None
     path=root/'media'/(ident+'.json')
     if not path.exists() or not (root/'media'/(ident+'.png')).exists():return None
     info=json.loads(path.read_text(encoding='utf-8'))
@@ -63,6 +68,7 @@ def asset_info(root, ident):
 
 def write_info(root, info):
     (root/'media'/(info['id']+'.json')).write_text(json.dumps(info,ensure_ascii=False,indent=2),encoding='utf-8')
+    objects.publish(root,'media/'+info['id']+'.json')
 
 
 def rels(archive,name):
@@ -77,6 +83,8 @@ def extract_media(path, document, root, render=True):
     if not source_path.exists():
         import shutil
         shutil.copyfile(path,source_path)
+    objects.publish(root,'sources/'+sha+path.suffix.lower())
+    objects.load_asset_index(root,sha)
     document['source_retained']=True
     assets=document['assets'];suffix=path.suffix.lower()
     if suffix=='.pptx':
@@ -107,6 +115,8 @@ def extract_media(path, document, root, render=True):
         if render and os.name!='nt':document['warnings'].append('Linux không có PowerPoint COM: chỉ trích ảnh gốc, không render toàn slide mới. Dùng PDF xuất từ PowerPoint nếu cần bố cục đầy đủ; ảnh nhóm/quan hệ vị trí phải được kiểm định.')
         if render:
             folder=root/'render-cache'/sha
+            if config.object_storage():
+                for name in objects.list_names('render-cache/'+sha+'/'):objects.ensure(root,name)
             if os.name=='nt' and os.environ.get('ADVENTURE_RENDER_PPTX','1')!='0' and not all((folder/f'slide-{s["number"]}.png').exists() for s in document['sections']):
                 try:
                     subprocess.run(['powershell.exe','-NoProfile','-ExecutionPolicy','Bypass','-File',str(ROOT/'scripts/render_pptx.ps1'),'-Source',str(source_path.resolve()),'-Destination',str(folder.resolve())],capture_output=True,timeout=100,check=True,creationflags=subprocess.CREATE_NO_WINDOW)

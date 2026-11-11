@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from backend.ai import configuration
+from backend import config
 
 
 def prepare(target):
@@ -17,10 +18,15 @@ def prepare(target):
     selected.extend(ROOT/name for name in ['README.md','PLAN.md','STATUS.md','.gitignore','.dockerignore','Dockerfile','render.yaml','netlify.toml','START-WEBSITE.cmd'])
     selected=sorted(set(p for p in selected if p.name not in ['.env','tsconfig.tsbuildinfo'] and (not p.name.startswith('.env.') or p.name=='.env.example')))
     key=configuration().get('GEMINI_API_KEY') or ''
+    secrets=[config.setting(k) for k in ('GEMINI_API_KEY','DATABASE_URL','DATABASE_DIRECT_URL','AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','AWS_SESSION_TOKEN')]
+    from urllib.parse import urlsplit,unquote
+    for value in list(secrets):
+        if value and value.startswith(('postgres://','postgresql://')):secrets.append(unquote(urlsplit(value).password or ''))
+    secrets=[v for v in secrets if config.configured(v) and len(v)>=8]
     for p in selected:
         relative=p.relative_to(ROOT)
         if p.stat().st_size>10*1024*1024:raise ValueError('Unexpected large source file: '+str(relative))
-        if key and key.encode() in p.read_bytes():raise ValueError('Secret detected; release not created')
+        if any(value.encode() in p.read_bytes() for value in secrets):raise ValueError('Secret detected; release not created')
     target.mkdir(parents=True)
     for p in selected:
         dest=target/p.relative_to(ROOT);dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(p,dest)

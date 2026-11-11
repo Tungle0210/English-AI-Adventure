@@ -1,6 +1,7 @@
 """Conservative, shared gate for generation, editing, publishing and gameplay."""
 import re
 from .media import asset_info
+from . import config
 
 WORDS={'one':'1','two':'2','three':'3','four':'4','five':'5','six':'6','seven':'7','eight':'8','nine':'9','ten':'10'}
 STOP={'the','a','an','is','are','it','there','at','of','in','on','to','what','which','how','many','color','colour','shape','does','do','look','picture','image','shown','this','that','its','with','where','s'}
@@ -101,7 +102,8 @@ def persisted(q):
 
 
 def refresh_lesson(lesson, root):
-    lesson['document']['assets']=[asset_info(root,a['id']) or a for a in lesson['document'].get('assets',[])]
+    used={q.get('image_asset_id') for q in lesson.get('questions',[])}
+    lesson['document']['assets']=[(asset_info(root,a['id']) or a) if not config.object_storage() or a['id'] in used else a for a in lesson['document'].get('assets',[])]
     lesson['questions']=[assess(q,lesson['document'],root) for q in lesson['questions']]
     return lesson
 

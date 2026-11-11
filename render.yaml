@@ -1,22 +1,26 @@
-# TEMPLATE ONLY: creating this service/disk requires a paid Render plan.
-# Nothing is deployed by writing this file. Review cost before using it.
+# PREPARATION ONLY. No deployment is triggered by this file.
+# Do not turn off maintenance until an explicitly authorized migration is verified.
 services:
   - type: web
-    name: english-ai-adventure-api
+    name: english-ai-adventure
     runtime: docker
-    plan: starter
+    plan: free
     numInstances: 1
     autoDeployTrigger: "off"
     healthCheckPath: /api/health
-    disk:
-      name: adventure-data
-      mountPath: /var/data
-      sizeGB: 5
     envVars:
       - key: ADVENTURE_ENV
         value: production
       - key: ADVENTURE_DATA_DIR
-        value: /var/data/adventure
+        value: /tmp/english-ai-cache
+      - key: ADVENTURE_CLOUD_ENABLE
+        value: "yes"
+      - key: ADVENTURE_DATABASE_BACKEND
+        value: postgres
+      - key: ADVENTURE_STORAGE_BACKEND
+        value: s3
+      - key: ADVENTURE_PG_SCHEMA
+        sync: false
       - key: ADVENTURE_MAINTENANCE
         value: "1"
       - key: ADVENTURE_IMPORT_READY
@@ -25,9 +29,29 @@ services:
         value: "0"
       - key: WEB_CONCURRENCY
         value: "1"
+      - key: PGSSLMODE
+        value: require
       - key: ADVENTURE_ALLOWED_ORIGINS
-        sync: false
+        value: https://english-ai-adventure.netlify.app
       - key: ADVENTURE_ALLOWED_HOSTS
+        value: english-ai-adventure.onrender.com
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_DIRECT_URL
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_SESSION_TOKEN
+        sync: false
+      - key: AWS_REGION
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: S3_PREFIX
         sync: false
       - key: GEMINI_API_KEY
         sync: false
