@@ -28,7 +28,9 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements.lock.txt
       - run: pip install -r backend/requirements-dev.txt
-      - run: python -m pytest backend -q --junitxml=production-tests.xml
+      # Private input files and historical QA fixtures intentionally never enter Git.
+      # These portable integration suites generate their own source documents.
+      - run: python -m pytest backend/test_production.py backend/test_neon_runtime.py -q --junitxml=production-tests.xml
         env:
           EAA_REHEARSAL_TESTS: "yes"
           ADVENTURE_CLOUD_ENABLE: "no"
