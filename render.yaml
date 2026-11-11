@@ -1,0 +1,35 @@
+# TEMPLATE ONLY: creating this service/disk requires a paid Render plan.
+# Nothing is deployed by writing this file. Review cost before using it.
+services:
+  - type: web
+    name: english-ai-adventure-api
+    runtime: docker
+    plan: starter
+    numInstances: 1
+    autoDeployTrigger: "off"
+    healthCheckPath: /api/health
+    disk:
+      name: adventure-data
+      mountPath: /var/data
+      sizeGB: 5
+    envVars:
+      - key: ADVENTURE_ENV
+        value: production
+      - key: ADVENTURE_DATA_DIR
+        value: /var/data/adventure
+      - key: ADVENTURE_MAINTENANCE
+        value: "1"
+      - key: ADVENTURE_IMPORT_READY
+        value: "no"
+      - key: ADVENTURE_RENDER_PPTX
+        value: "0"
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: ADVENTURE_ALLOWED_ORIGINS
+        sync: false
+      - key: ADVENTURE_ALLOWED_HOSTS
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        sync: false

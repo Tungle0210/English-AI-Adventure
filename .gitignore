@@ -1,0 +1,54 @@
+# Gemini API Key và biến môi trường
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python
+backend/data/
+reports/screenshots/
+frontend/playwright-report/
+frontend/test-results/
+.cache/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Node.js / React
+node_modules/
+dist/
+build/
+.next/
+
+# File hệ thống
+.DS_Store
+Thumbs.db
+
+# Log
+*.log
+
+# File tạm
+*.tmp
+*.bak
+
+# Private production exports and local migration copies
+private-backups/
+private-production-data/
+*.data-bundle.zip
+
+
+# Teaching materials and QA output stay local/private
+input/
+reports/
+s-n-ph-m-AI/
+frontend/*.tsbuildinfo
+deploy/release/
+
+
+# All generated release variants
+deploy/
+

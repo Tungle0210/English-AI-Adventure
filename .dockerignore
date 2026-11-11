@@ -1,0 +1,14 @@
+**/.env
+**/.env.*
+!**/.env.example
+.git
+**/.venv
+**/__pycache__
+**/.pytest_cache
+backend/data
+frontend
+input
+reports
+s-n-ph-m-AI
+.cache
+**/*.log
