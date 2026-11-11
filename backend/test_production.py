@@ -348,7 +348,7 @@ def test_permanent_delete_blocks_live_student_attempt_and_running_job(client):
     with main.db() as c:
         c.execute('UPDATE attempts SET completed=? WHERE id=?',(main.now(),'live-attempt'))
         c.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                  ('pending-delete-test','generate',lesson['id'],'{}','test-fingerprint','pending-delete-test','queued',None,None,1.0,1.0))
+                  ('pending-delete-test','generate',lesson['id'],'{}','test-fingerprint','pending-delete-test','running',None,None,1.0,1.0))
     assert client.request('DELETE',url,json=body).status_code==409
     assert client.get(url).status_code==200
 
