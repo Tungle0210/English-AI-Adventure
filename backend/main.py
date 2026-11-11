@@ -346,6 +346,7 @@ def delete_lesson_permanently(ident: str, body: ConfirmPermanentDeletion):
             c.execute("DELETE FROM upload_sessions WHERE id=? AND state='complete'",(upload_id,))
 
     candidates=set()
+    source_listing_failed=False
     if not shared_source and isinstance(source_hash,str) and len(source_hash)==64 and all(ch in '0123456789abcdef' for ch in source_hash):
         try:
             if config.object_storage():
@@ -354,12 +355,12 @@ def delete_lesson_permanently(ident: str, body: ConfirmPermanentDeletion):
                 candidates.update('sources/'+p.name for p in (DATA/'sources').glob(source_hash+'.*') if p.suffix in EXTENSIONS)
         except objects.ObjectFailure:
             # The database deletion succeeded; report incomplete storage cleanup.
-            pass
+            source_listing_failed=True
         candidates.add('indexes/'+source_hash+'.json')
     for media_id in media_ids:
         candidates.add('media/'+media_id+'.png');candidates.add('media/'+media_id+'.json')
     for run_id in run_ids:candidates.add('qa/generation/'+run_id+'.json')
-    warnings=[]
+    warnings=['Không thể liệt kê toàn bộ file nguồn S3 để dọn; cần kiểm tra thủ công.'] if source_listing_failed else []
     for upload_id in upload_ids:
         try:
             if config.object_storage():
@@ -742,7 +743,14 @@ def get_attempt(ident: str):
     if not row:
         raise HTTPException(404, 'Không tìm thấy lượt chơi.')
     result = result_data(row)
-    with db() as c:document=get_lesson(c,row['lesson_id'])['document']
+    with db() as c:
+        source=c.execute('SELECT document FROM lessons WHERE id=?',(row['lesson_id'],)).fetchone()
+    if not source and row['completed']:
+        # Completed results survive permanent deletion without exposing answers.
+        result['questions']=[];result['match_bank']=[]
+        return result
+    if not source:raise HTTPException(404,'Bài học gốc không còn tồn tại.')
+    document=json.loads(source['document'])
     result['questions'] = public_questions(json.loads(row['questions']),document)
     result['match_bank'] = sorted(q['meaning'] for q in json.loads(row['questions']) if q['kind'] == 'match')
     return result
