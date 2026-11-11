@@ -298,6 +298,7 @@ def delete_lesson_permanently(ident: str, body: ConfirmPermanentDeletion):
         for r,d in zip(all_lessons,other_docs):
             in_use.update(a.get('id') for a in d.get('assets',[]))
             in_use.update(q.get('image_asset_id') for q in json.loads(r['questions']))
+        preserved_attempts=c.execute('SELECT COUNT(*) FROM attempts WHERE lesson_id=?',(ident,)).fetchone()[0]
         attempt_rows=c.execute('SELECT questions FROM attempts').fetchall()
         for a in attempt_rows:
             in_use.update(q.get('image_asset_id') for q in json.loads(a['questions']))
@@ -375,7 +376,7 @@ def delete_lesson_permanently(ident: str, body: ConfirmPermanentDeletion):
         except (objects.ObjectFailure,OSError):
             warnings.append('Có tệp chưa được dọn khỏi lưu trữ; cần kiểm tra thủ công.')
     return {'deleted':True,'storage_removed':removed,'storage_warnings':list(dict.fromkeys(warnings)),
-            'preserved_student_results':len([a for a in attempt_rows])}
+            'preserved_student_results':preserved_attempts}
 
 
 @app.post('/api/upload', dependencies=[Depends(teacher)])
