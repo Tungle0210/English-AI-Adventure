@@ -55,6 +55,13 @@ def check_ai_budget(c):
     if c.execute('SELECT COUNT(*) FROM calls WHERE at>?',(stamp-30,)).fetchone()[0]>=1:raise HTTPException(429,'Vui lòng chờ đủ 30 giây từ lần gọi AI gần nhất. Giới hạn local 1 lượt/30 giây; không phải quota Google.')
 
 
+def reserve_ai_retry():
+    """Reserve another API request only after the 503 cooldown has elapsed."""
+    with db() as c:
+        check_ai_budget(c)
+        c.execute('INSERT INTO calls VALUES(?)', (time.time(),))
+
+
 def init_db():
     DATA.mkdir(parents=True, exist_ok=True)
     (DATA / 'uploads').mkdir(exist_ok=True)
@@ -343,7 +350,9 @@ def ai_error(error):
     if code == 404:
         return 502, 'Model Gemini không khả dụng (404). Bài đã lưu vẫn dùng được.'
     if code == 503:
-        return 503, 'Gemini đang quá tải (503). Bài học đã lưu vẫn chơi được; không tự thử lại hoặc đổi model.'
+        return 503, 'Gemini vẫn không khả dụng (HTTP 503) sau tối đa 2 lần gọi, cách nhau ít nhất 30 giây và đều tính vào hạn mức. Bản nháp và bài học đã lưu được giữ nguyên. Hãy kiểm tra trạng thái tác vụ trước khi chủ động thử lại sau.'
+    if code in (500, 502, 504):
+        return 502, 'Gemini trả lỗi máy chủ (HTTP ' + str(code) + '). Bản nháp được giữ nguyên; kiểm tra trạng thái tác vụ trước khi thử lại.'
     if code in (400, 401, 403):
         return 502, 'Gemini từ chối yêu cầu/cấu hình. Kiểm tra quyền API và model; không bật billing.'
     if isinstance(error, RuntimeError):
@@ -373,7 +382,10 @@ def generate_lesson(ident: str, settings: GenerateRequest):
                 c.execute('INSERT INTO calls VALUES(?)', (time.time(),))
         if not cached:
             try:
-                generated, meta = ai.generate(current['document'], settings, media_root=DATA)
+                generated, meta = ai.generate(current['document'], settings, media_root=DATA, on_transient_retry=reserve_ai_retry)
+            except HTTPException:
+                # Local quota protection must remain 429, not be reported as Gemini failure.
+                raise
             except Exception as error:
                 status, message = ai_error(error)
                 # A bounded diagnostic, redacted before persistence; never stringify request/headers.

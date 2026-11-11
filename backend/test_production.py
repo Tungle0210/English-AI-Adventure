@@ -216,3 +216,61 @@ def test_single_writer_lock(tmp_path):
         with pytest.raises(RuntimeError,match='Another process'):
             with single_writer(tmp_path):pass
     with single_writer(tmp_path):pass
+
+
+def test_gemini_retry_requires_separate_quota_reservation(client):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    class ProviderError(Exception):
+        def __init__(self, code):
+            super().__init__('synthetic provider failure')
+            self.code = code
+
+    document = {'sections': [{'number': 1, 'text': 'apple table'}]}
+    settings = main.GenerateRequest(count=1, kinds=['quiz'])
+    fake_client = MagicMock()
+    fake_client.__enter__.return_value = fake_client
+    reply = SimpleNamespace(text='{"questions":[]}', usage_metadata=None, candidates=[])
+    fake_client.models.generate_content.side_effect = [ProviderError(503), reply]
+    reserved = MagicMock()
+    with patch.object(ai, 'configuration', return_value={'GEMINI_API_KEY': 'fake-test-key', 'GEMINI_MODEL': 'gemini-3.5-flash-lite'}), \
+         patch.object(ai.genai, 'Client', return_value=fake_client), \
+         patch.object(ai, 'validate_output', return_value=(generated(), {'parse_ms': 0})), \
+         patch.object(ai.time, 'sleep') as delay:
+        result, metrics = ai.generate(document, settings, on_transient_retry=reserved)
+    assert result.questions and metrics['sdk_attempts'] == 2
+    assert fake_client.models.generate_content.call_count == 2
+    reserved.assert_called_once_with()
+    delay.assert_called_once_with(31)
+
+
+def test_gemini_503_without_quota_reservation_never_retries():
+    from unittest.mock import MagicMock
+
+    class ProviderError(Exception):
+        code = 503
+
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.models.generate_content.side_effect = ProviderError()
+    with patch.object(ai, 'configuration', return_value={'GEMINI_API_KEY': 'fake-test-key', 'GEMINI_MODEL': 'gemini-3.5-flash-lite'}), \
+         patch.object(ai.genai, 'Client', return_value=client), \
+         patch.object(ai.time, 'sleep') as delay:
+        with pytest.raises(ProviderError) as err:
+            ai.generate({'sections': [{'number': 1, 'text': 'apple table'}]}, main.GenerateRequest(count=1, kinds=['quiz']))
+    assert client.models.generate_content.call_count == 1
+    assert err.value.pipeline_metrics['sdk_attempts'] == 1
+    delay.assert_not_called()
+
+
+def test_retry_reservation_enforces_local_rate_limit(client):
+    with main.db() as c:
+        c.execute('INSERT INTO calls VALUES(?)', (999969,))
+    with patch('backend.main.time.time', return_value=1000000):
+        main.reserve_ai_retry()
+        with pytest.raises(HTTPException) as err:
+            main.reserve_ai_retry()
+    assert err.value.status_code == 429
+    with main.db() as c:
+        assert c.execute('SELECT count(*) FROM calls').fetchone()[0] == 2
